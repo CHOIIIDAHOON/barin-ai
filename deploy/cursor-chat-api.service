@@ -1,0 +1,20 @@
+[Unit]
+Description=Cursor Agent Chat API (FastAPI)
+After=network.target
+
+[Service]
+Type=simple
+User=cursor-chat
+Group=cursor-chat
+WorkingDirectory=/opt/chatbot-api
+Environment=HOME=/var/lib/cursor-chat
+EnvironmentFile=/opt/chatbot-api/.env
+ExecStart=/opt/chatbot-api/.venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=5
+
+# Agent workspace (must match CURSOR_PROJECT_DIR in .env if you change it).
+ReadWritePaths=/var/cursor-project
+
+[Install]
+WantedBy=multi-user.target
