@@ -54,6 +54,15 @@ sudo systemctl status cursor-chat-api
 
 ## 4. Nginx (443 프록시 + TLS)
 
+### 테스트: 도메인 없이 공인 IP + HTTP만
+
+- **`deploy/nginx-site-ip-http.example.conf`** — `server_name _;` + 80 포트 기본 서버, 스니펫만 include  
+  - `include` 줄을 `/home/ubuntu/barin-ai/deploy/nginx-snippet.conf` 등 **본인 경로**로 수정 후 복사  
+  - 방화벽: **`ufw allow 80/tcp`** (8000은 밖에 안 열어도 됨 — Nginx가 127.0.0.1:8000 으로 프록시)  
+  - 호출 예: `http://공인IP/health`, `http://공인IP/chat`  
+- **주의:** HTTP는 **평문**이라 토큰·대화가 노출될 수 있음. 테스트 후 **도메인 + HTTPS**로 바꾸는 것을 권장.  
+- Nginx 없이 빠르게만 보려면: Uvicorn을 `0.0.0.0:8000` 으로 띄우고 방화벽에서 8000 허용 (역시 평문).
+
 Uvicorn은 **`127.0.0.1:8000`** 만 쓰고, 밖에는 **80·443** 만 연다 (예: `ufw allow 80,443/tcp`).
 
 ### 한 번에 쓸 수 있는 예시
