@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -159,6 +160,11 @@ async def chat(
     cmd = build_agent_command(prompt)
     env = os.environ.copy()
 
+    # SSH 터미널에서 띄운 Uvicorn + Ctrl+C 등이 자식 agent 에 SIGINT 를 보내 130/-2 로 끊기는 것을 줄임.
+    sub_kw: dict = {}
+    if sys.platform != "win32":
+        sub_kw["start_new_session"] = True
+
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -166,6 +172,7 @@ async def chat(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
+            **sub_kw,
         )
     except FileNotFoundError:
         logger.error("POST /chat: cursor CLI 없음 cmd[0]=%s", cmd[0] if cmd else "")
