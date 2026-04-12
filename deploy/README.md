@@ -52,15 +52,40 @@ sudo systemctl status cursor-chat-api
 
 로그: `journalctl -u cursor-chat-api -f`
 
-## 4. Nginx (HTTPS 권장)
+## 4. Nginx (443 프록시 + TLS)
 
-`server { ... }` 안에 `deploy/nginx-snippet.conf` 내용을 합친 뒤:
+Uvicorn은 **`127.0.0.1:8000`** 만 쓰고, 밖에는 **80·443** 만 연다 (예: `ufw allow 80,443/tcp`).
+
+### 한 번에 쓸 수 있는 예시
+
+- **`deploy/nginx-site-https.example.conf`**  
+  - `api.example.com` → 본인 도메인으로 수정  
+  - 하단 `include .../nginx-snippet.conf` 경로를 서버上的 앱 디렉터리로 수정 (`/opt/chatbot-api` 또는 `/home/ubuntu/barin-ai` 등)
+
+### Let’s Encrypt (Certbot) 예시
+
+DNS A 레코드가 이 서버를 가리킨 뒤:
 
 ```bash
+sudo apt install -y certbot python3-certbot-nginx
+# 사이트 설정을 먼저 80만으로 올리거나, certbot이 안내하는 대로 진행
+sudo certbot --nginx -d api.example.com
+```
+
+인증서 경로는 보통 `/etc/letsencrypt/live/api.example.com/` 아래입니다. 예시 파일의 `ssl_certificate` 줄과 맞춥니다.
+
+### 활성화
+
+```bash
+sudo cp /opt/chatbot-api/deploy/nginx-site-https.example.conf /etc/nginx/sites-available/barin-ai-api
+sudo ln -sf /etc/nginx/sites-available/barin-ai-api /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
-에이전트 응답이 길 수 있으므로 스니펫의 `proxy_read_timeout 600s`를 유지하는 것이 좋습니다.
+앱 `.env`: **`USE_NGINX_CORS=true`**  
+에이전트 응답이 길 수 있으므로 스니펫의 **`proxy_read_timeout 600s`** 를 유지하는 것이 좋습니다.
+
+외부에서 호출 URL 예: `https://api.example.com/chat`, `https://api.example.com/health`.
 
 ## 5. 동작 확인
 
