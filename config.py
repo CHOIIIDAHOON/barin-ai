@@ -1,6 +1,10 @@
 from pathlib import Path
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import (
+    BaseSettings,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
 
 _APP_DIR = Path(__file__).resolve().parent
 
@@ -11,6 +15,24 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        # 기본은 env가 .env보다 우선 → SSH(SendEnv)로 Mac의 CURSOR_* 가 넘어오면 서버 .env가 무시됨.
+        # 배포 시에는 보통 .env가 진실이므로 dotenv를 env보다 먼저 두어 .env가 이김.
+        return (
+            init_settings,
+            dotenv_settings,
+            env_settings,
+            file_secret_settings,
+        )
 
     # Directory the Cursor agent uses as the project root (must exist on the server).
     cursor_project_dir: str = "/var/cursor-project"
