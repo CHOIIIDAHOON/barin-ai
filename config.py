@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -47,6 +48,10 @@ class Settings(BaseSettings):
     cursor_model: str = "composer-2-fast"
     # Optional: cursor agent --mode. "ask" = read-only Q&A (no edits), usually lower latency than full agent.
     cursor_agent_mode: str = ""
+    # 서버 무인 실행 시 필수에 가깝다. 미설정이면 첫 실행이 로그인/인증 대기로 끝까지 멈출 수 있음 (값은 로그에 노출하지 말 것).
+    cursor_api_key: str = Field(default="", validation_alias="CURSOR_API_KEY")
+    # true면 CLI --force (도구/쉘 자동 허용). 승인 대기로 멈출 때 켜되 저장소에 쓰기·명령 실행이 가능해진다.
+    cursor_agent_force: bool = Field(default=False, validation_alias="CURSOR_AGENT_FORCE")
 
     # Flutter 웹 등: 브라우저 Origin이 API와 다르면 CORS 헤더 필요. 쉼표로 여러 개.
     # 예: CORS_ALLOW_ORIGINS=https://myapp.web.app,http://localhost:5555
