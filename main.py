@@ -119,6 +119,8 @@ def health() -> dict[str, str]:
         # 어떤 프로세스가 8000을 잡았는지 대조용 (비밀 아님)
         "app_dir": str(_APP_ROOT),
         "cursor_project_dir": settings.cursor_project_dir,
+        "cursor_model": settings.cursor_model,
+        "cursor_agent_mode": settings.cursor_agent_mode or "(default full agent)",
     }
     if settings.mock_agent:
         out["cursor_agent"] = "mock"
