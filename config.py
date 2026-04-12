@@ -14,7 +14,7 @@ class Settings(BaseSettings):
 
     # Directory the Cursor agent uses as the project root (must exist on the server).
     cursor_project_dir: str = "/var/cursor-project"
-    # Path to `cursor` binary; use full path in systemd (e.g. /usr/local/bin/cursor).
+    # `cursor` (runs `cursor agent …`) or standalone `agent` binary (basename agent → no extra subcommand).
     cursor_cli_path: str = "cursor"
     # Subprocess timeout in seconds (agent runs can be long).
     agent_timeout_sec: int = 600

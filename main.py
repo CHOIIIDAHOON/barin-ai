@@ -1,7 +1,10 @@
 import asyncio
 import logging
 import os
+from pathlib import Path
 from typing import Annotated, Literal
+
+_APP_ROOT = Path(__file__).resolve().parent
 
 logger = logging.getLogger("chatbot_api")
 
@@ -85,10 +88,19 @@ def verify_bearer(
         raise HTTPException(status_code=401, detail="Invalid or missing Authorization Bearer token")
 
 
+def _cli_is_standalone_agent_binary(cli: str) -> bool:
+    """~/.local/bin/agent 처럼 `agent` 단독 실행 파일이면 True (cursor agent 서브커맨드 아님)."""
+    name = Path((cli or "").strip() or "cursor").name
+    return name in ("agent", "agent.exe")
+
+
 def build_agent_command(prompt: str) -> list[str]:
-    cli = settings.cursor_cli_path
+    cli = settings.cursor_cli_path.strip() or "cursor"
     # Non-interactive API: skip "Workspace Trust Required" prompt for cursor_project_dir.
-    cmd: list[str] = [cli, "agent", "--trust"]
+    if _cli_is_standalone_agent_binary(cli):
+        cmd: list[str] = [cli, "--trust"]
+    else:
+        cmd = [cli, "agent", "--trust"]
     model = settings.cursor_model.strip()
     if model:
         cmd.extend(["--model", model])
@@ -101,7 +113,12 @@ def build_agent_command(prompt: str) -> list[str]:
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    out: dict[str, str] = {"status": "ok"}
+    out: dict[str, str] = {
+        "status": "ok",
+        # 어떤 프로세스가 8000을 잡았는지 대조용 (비밀 아님)
+        "app_dir": str(_APP_ROOT),
+        "cursor_project_dir": settings.cursor_project_dir,
+    }
     if settings.mock_agent:
         out["cursor_agent"] = "mock"
     return out
@@ -142,13 +159,23 @@ async def chat(
     cmd = build_agent_command(prompt)
     env = os.environ.copy()
 
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        cwd=project,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=env,
-    )
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            cwd=project,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+    except FileNotFoundError:
+        logger.error("POST /chat: cursor CLI 없음 cmd[0]=%s", cmd[0] if cmd else "")
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Cursor agent executable not found. Set CURSOR_CLI_PATH in .env to a full path "
+                f"(e.g. `which cursor` or `which agent`). Config has: {settings.cursor_cli_path!r}."
+            ),
+        )
     try:
         stdout_b, stderr_b = await asyncio.wait_for(
             proc.communicate(),
