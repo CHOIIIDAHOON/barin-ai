@@ -1,14 +1,13 @@
 import logging
 import os
+import secrets
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Dict, Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
-from starlette.requests import Request
-
 from config import settings
 from schemas import AssistantMessage, ChatRequest, ChatResponse, WarmupResponse
 from utils.auth import require_bearer
@@ -49,13 +48,24 @@ async def _request_timing_middleware(request: Request, call_next):
     elapsed = time.perf_counter() - t0
     path = request.url.path
     if path != "/health":
-        logger.info(
-            "HTTP %s %s -> %s in %.3fs",
-            request.method,
-            path,
-            response.status_code,
-            elapsed,
-        )
+        rid = getattr(request.state, "agent_run_id", None)
+        if rid:
+            logger.info(
+                "HTTP %s %s -> %s in %.3fs [run_id=%s]",
+                request.method,
+                path,
+                response.status_code,
+                elapsed,
+                rid,
+            )
+        else:
+            logger.info(
+                "HTTP %s %s -> %s in %.3fs",
+                request.method,
+                path,
+                response.status_code,
+                elapsed,
+            )
     return response
 
 if not settings.use_nginx_cors:
@@ -80,7 +90,7 @@ def health() -> Dict[str, str]:
 
 
 @app.post("/warmup", response_model=WarmupResponse, dependencies=[Depends(require_bearer)])
-async def warmup() -> WarmupResponse:
+async def warmup(request: Request) -> WarmupResponse:
     """첫 Cursor CLI 기동·인증·캐시를 미리 끌어올릴 때 호출(클라이언트 기동 시 1회 권장)."""
     t_req = time.perf_counter()
     if settings.mock_agent:
@@ -97,15 +107,25 @@ async def warmup() -> WarmupResponse:
             detail=f"cursor_project_dir 경로가 디렉터리가 아닙니다: {project}",
         )
 
+    run_id = secrets.token_hex(4)
+    request.state.agent_run_id = run_id
+    logger.info(
+        "[%s] POST /warmup: Cursor agent 호출 시작 (최대 %ss)",
+        run_id,
+        settings.warmup_timeout_sec,
+    )
+
     t_agent_start = time.perf_counter()
     try:
         _out, err, returncode = await run_cursor_agent(
             _WARMUP_PROMPT,
             timeout_sec=settings.warmup_timeout_sec,
+            run_id=run_id,
         )
     except FileNotFoundError:
         logger.info(
-            "POST /warmup 타이밍: cursor_agent=%.3fs (FileNotFoundError) total=%.3fs",
+            "[%s] POST /warmup 타이밍: cursor_agent=%.3fs (FileNotFoundError) total=%.3fs",
+            run_id,
             time.perf_counter() - t_agent_start,
             time.perf_counter() - t_req,
         )
@@ -118,7 +138,8 @@ async def warmup() -> WarmupResponse:
         )
     except TimeoutError:
         logger.info(
-            "POST /warmup 타이밍: cursor_agent=%.3fs (TimeoutError) total=%.3fs",
+            "[%s] POST /warmup 타이밍: cursor_agent=%.3fs (TimeoutError) total=%.3fs",
+            run_id,
             time.perf_counter() - t_agent_start,
             time.perf_counter() - t_req,
         )
@@ -132,12 +153,13 @@ async def warmup() -> WarmupResponse:
 
     if returncode != 0:
         logger.info(
-            "POST /warmup 타이밍: cursor_agent=%.3fs (비정상 종료 returncode=%s) total=%.3fs",
+            "[%s] POST /warmup 타이밍: cursor_agent=%.3fs (비정상 종료 returncode=%s) total=%.3fs",
+            run_id,
             time.perf_counter() - t_agent_start,
             returncode,
             time.perf_counter() - t_req,
         )
-        logger.error("POST /warmup: agent 실패 returncode=%s", returncode)
+        logger.error("[%s] POST /warmup: agent 실패 returncode=%s", run_id, returncode)
         raise HTTPException(
             status_code=502,
             detail={
@@ -149,7 +171,8 @@ async def warmup() -> WarmupResponse:
         )
 
     logger.info(
-        "POST /warmup 타이밍: cursor_agent=%.3fs total=%.3fs",
+        "[%s] POST /warmup 타이밍: cursor_agent=%.3fs total=%.3fs",
+        run_id,
         time.perf_counter() - t_agent_start,
         time.perf_counter() - t_req,
     )
@@ -158,6 +181,7 @@ async def warmup() -> WarmupResponse:
 
 @app.post("/chat", response_model=ChatResponse, dependencies=[Depends(require_bearer)])
 async def chat(
+    request: Request,
     body: ChatRequest,
     debug: bool = Query(False, description="응답의 debug 필드에 stdout/stderr 포함 여부"),
 ) -> ChatResponse:
@@ -183,8 +207,11 @@ async def chat(
         )
         return ChatResponse(message=AssistantMessage(content=content), debug=dbg)
 
+    run_id = secrets.token_hex(4)
+    request.state.agent_run_id = run_id
     logger.info(
-        "POST /chat: Cursor agent 시작 — 끝날 때까지 응답을 보내지 않음 (최대 %ss)",
+        "[%s] POST /chat: Cursor agent 시작 — 끝날 때까지 응답을 보내지 않음 (최대 %ss)",
+        run_id,
         settings.agent_timeout_sec,
     )
     if not (settings.cursor_api_key or "").strip() and not _warned_missing_cursor_api_key:
@@ -211,10 +238,12 @@ async def chat(
         out, err, returncode = await run_cursor_agent(
             prompt,
             timeout_sec=settings.agent_timeout_sec,
+            run_id=run_id,
         )
     except FileNotFoundError:
         logger.info(
-            "POST /chat 타이밍: prompt_build=%.3fs cursor_agent=%.3fs (FileNotFoundError) total=%.3fs",
+            "[%s] POST /chat 타이밍: prompt_build=%.3fs cursor_agent=%.3fs (FileNotFoundError) total=%.3fs",
+            run_id,
             t_prompt,
             time.perf_counter() - t_agent_start,
             time.perf_counter() - t_req,
@@ -228,7 +257,8 @@ async def chat(
         )
     except TimeoutError:
         logger.info(
-            "POST /chat 타이밍: prompt_build=%.3fs cursor_agent=%.3fs (TimeoutError) total=%.3fs",
+            "[%s] POST /chat 타이밍: prompt_build=%.3fs cursor_agent=%.3fs (TimeoutError) total=%.3fs",
+            run_id,
             t_prompt,
             time.perf_counter() - t_agent_start,
             time.perf_counter() - t_req,
@@ -240,14 +270,15 @@ async def chat(
 
     t_agent = time.perf_counter() - t_agent_start
     logger.info(
-        "POST /chat 타이밍: prompt_build=%.3fs cursor_agent=%.3fs total=%.3fs",
+        "[%s] POST /chat 타이밍: prompt_build=%.3fs cursor_agent=%.3fs total=%.3fs",
+        run_id,
         t_prompt,
         t_agent,
         time.perf_counter() - t_req,
     )
 
     if returncode != 0:
-        logger.error("POST /chat: agent 실패 returncode=%s", returncode)
+        logger.error("[%s] POST /chat: agent 실패 returncode=%s", run_id, returncode)
         raise HTTPException(
             status_code=502,
             detail={
@@ -259,7 +290,7 @@ async def chat(
             },
         )
 
-    logger.info("POST /chat: agent 완료, stdout 길이=%s", len(out))
+    logger.info("[%s] POST /chat: agent 완료, stdout 길이=%s", run_id, len(out))
     content = out if out else "(에이전트 출력 없음)"
     dbg = None
     if debug:

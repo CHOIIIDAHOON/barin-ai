@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import secrets
 import sys
 import time
 from typing import Optional, Tuple
@@ -18,6 +19,7 @@ async def _wait_communicate_with_heartbeat(
     proc: asyncio.subprocess.Process,
     comm_task: asyncio.Task,
     *,
+    run_id: str,
     timeout_sec: float,
     heartbeat_sec: float,
 ) -> bool:
@@ -34,7 +36,8 @@ async def _wait_communicate_with_heartbeat(
             return True
         elapsed += chunk
         logger.info(
-            "Cursor 에이전트 실행 중… (경과 약 %.0fs / 제한 %ss, PID=%s)",
+            "[%s] Cursor 에이전트 실행 중… (경과 약 %.0fs / 제한 %ss, PID=%s)",
+            run_id,
             elapsed,
             int(timeout_sec),
             proc.pid,
@@ -47,11 +50,13 @@ async def run_cursor_agent(
     *,
     timeout_sec: int,
     heartbeat_log_sec: Optional[float] = None,
+    run_id: Optional[str] = None,
 ) -> Tuple[str, str, int]:
     """
     Cursor/agent CLI를 실행하고 (stdout, stderr, returncode)를 돌려준다.
     타임아웃 시 하위 프로세스를 정리하고 asyncio.TimeoutError를 발생시킨다.
     """
+    rid = (run_id or "").strip() or secrets.token_hex(4)
     hb = (
         float(settings.agent_heartbeat_log_sec)
         if heartbeat_log_sec is None
@@ -81,10 +86,15 @@ async def run_cursor_agent(
             **sub_kw,
         )
     except FileNotFoundError:
-        logger.error("cursor/agent 실행 파일을 찾을 수 없음 cmd[0]=%r", cmd[0] if cmd else "")
+        logger.error(
+            "[%s] cursor/agent 실행 파일을 찾을 수 없음 cmd[0]=%r",
+            rid,
+            cmd[0] if cmd else "",
+        )
         raise
 
     t_spawn = time.perf_counter() - t_run
+    logger.info("[%s] Cursor 에이전트 하위 프로세스 시작 PID=%s", rid, proc.pid)
     comm_task = asyncio.create_task(proc.communicate())
     try:
         if hb <= 0:
@@ -98,16 +108,17 @@ async def run_cursor_agent(
             ok = await _wait_communicate_with_heartbeat(
                 proc,
                 comm_task,
+                run_id=rid,
                 timeout_sec=float(timeout_sec),
                 heartbeat_sec=max(5.0, hb),
             )
     except asyncio.CancelledError:
-        logger.info("Cursor agent: 요청 취소됨 — 하위 프로세스 정리")
+        logger.info("[%s] Cursor agent: 요청 취소됨 — 하위 프로세스 정리", rid)
         await asyncio.shield(reap_proc(proc, comm_task))
         raise
 
     if not ok:
-        logger.error("Cursor agent: 타임아웃 (%ss)", timeout_sec)
+        logger.error("[%s] Cursor agent: 타임아웃 (%ss)", rid, timeout_sec)
         await asyncio.shield(reap_proc(proc, comm_task))
         raise asyncio.TimeoutError()
 
@@ -122,7 +133,8 @@ async def run_cursor_agent(
     t_total = time.perf_counter() - t_run
     t_communicate = max(0.0, t_total - t_spawn)
     logger.info(
-        "cursor_agent 내부 타이밍: subprocess_create=%.3fs communicate_wait=%.3fs total=%.3fs prompt_chars=%s",
+        "[%s] cursor_agent 내부 타이밍: subprocess_create=%.3fs communicate_wait=%.3fs total=%.3fs prompt_chars=%s",
+        rid,
         t_spawn,
         t_communicate,
         t_total,
