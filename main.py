@@ -6,13 +6,26 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Dict, Optional
 
+import asyncio
+import json
+
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.responses import StreamingResponse
 from config import settings
-from schemas import AssistantMessage, ChatRequest, ChatResponse, WarmupResponse
+from schemas import (
+    AssistantMessage,
+    ChatJobCreateResponse,
+    ChatJobRequest,
+    ChatJobStatusResponse,
+    ChatRequest,
+    ChatResponse,
+    WarmupResponse,
+)
+from utils.agent_worker import AgentWorker
 from utils.auth import require_bearer
 from utils.cors import apply_cors
-from utils.cursor_agent import run_cursor_agent
+from utils.cursor_agent import run_cursor_agent, stream_cursor_agent
 from utils.http_handlers import validation_error
 from utils.logging_setup import setup_app_logging
 from utils.prompt import msgs_to_prompt
@@ -29,7 +42,13 @@ _warned_missing_cursor_api_key = False
 async def _lifespan(app: FastAPI):
     log_dir = setup_app_logging(_APP_ROOT)
     logger.info("기동 완료 — 타이밍·요청 로그는 %s 에 기록됩니다.", log_dir / "app.log")
+    worker = AgentWorker()
+    await worker.start()
+    app.state.agent_worker = worker
+    logger.info("AgentWorker started (concurrency=%s)", settings.agent_worker_concurrency)
     yield
+    await worker.stop()
+    logger.info("AgentWorker stopped")
 
 
 app = FastAPI(
@@ -86,6 +105,8 @@ def health() -> Dict[str, str]:
     }
     if settings.mock_agent:
         out["cursor_agent"] = "mock"
+    out["agent_worker_concurrency"] = str(settings.agent_worker_concurrency)
+    out["agent_job_store_max"] = str(settings.agent_job_store_max)
     return out
 
 
@@ -296,3 +317,146 @@ async def chat(
     if debug:
         dbg = {"stdout": out, "stderr": err}
     return ChatResponse(message=AssistantMessage(content=content), debug=dbg)
+
+def _sse_pack(obj: dict) -> str:
+    return "data: " + json.dumps(obj, ensure_ascii=False) + "\n\n"
+
+
+@app.post(
+    "/chat/jobs",
+    response_model=ChatJobCreateResponse,
+    dependencies=[Depends(require_bearer)],
+)
+async def chat_enqueue(request: Request, body: ChatJobRequest) -> ChatJobCreateResponse:
+    """Queue a chat run; poll GET /chat/jobs/{job_id} or use webhook_url."""
+    job_id = secrets.token_hex(8)
+    run_id = secrets.token_hex(4)
+    request.state.agent_run_id = run_id
+    worker: AgentWorker = request.app.state.agent_worker
+
+    if settings.mock_agent:
+        last_user = next(
+            (m.content for m in reversed(body.messages) if m.role == "user"),
+            "",
+        )
+        content = (
+            "[MOCK] Cursor CLI is bypassed.\n\nLast user message:\n"
+            + (last_user or "(empty)")
+            + "\n\nSet MOCK_AGENT=false in .env for real runs."
+        )
+        await worker.submit_mock_job(
+            job_id=job_id,
+            run_id=run_id,
+            content=content,
+            webhook_url=body.webhook_url,
+        )
+        return ChatJobCreateResponse(job_id=job_id)
+
+    if not os.path.isdir(settings.cursor_project_dir):
+        raise HTTPException(
+            status_code=500,
+            detail=f"cursor_project_dir is not a directory: {settings.cursor_project_dir}",
+        )
+
+    prompt = msgs_to_prompt(body.messages)
+    await worker.submit_job(
+        job_id=job_id,
+        run_id=run_id,
+        prompt=prompt,
+        webhook_url=body.webhook_url,
+    )
+    return ChatJobCreateResponse(job_id=job_id)
+
+
+@app.get(
+    "/chat/jobs/{job_id}",
+    response_model=ChatJobStatusResponse,
+    dependencies=[Depends(require_bearer)],
+)
+async def chat_job_status(request: Request, job_id: str) -> ChatJobStatusResponse:
+    worker: AgentWorker = request.app.state.agent_worker
+    rec = await worker.get_job(job_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="unknown job_id")
+    msg = None
+    err = rec.error
+    if rec.status == "completed":
+        msg = AssistantMessage(content=rec.stdout or "(empty agent output)")
+        err = None
+    return ChatJobStatusResponse(
+        job_id=rec.job_id,
+        status=rec.status,  # type: ignore[arg-type]
+        message=msg,
+        error=err,
+        returncode=rec.returncode,
+        stderr_tail=(rec.stderr[-8000:] if rec.stderr else None),
+        webhook_delivered=rec.webhook_delivered,
+        webhook_error=rec.webhook_error,
+    )
+
+
+@app.post("/chat/stream", dependencies=[Depends(require_bearer)])
+async def chat_stream(request: Request, body: ChatRequest) -> StreamingResponse:
+    """Server-Sent Events: stream agent stdout; final event has returncode / stderr."""
+    run_id = secrets.token_hex(4)
+    request.state.agent_run_id = run_id
+
+    async def gen():
+        if settings.mock_agent:
+            last_user = next(
+                (m.content for m in reversed(body.messages) if m.role == "user"),
+                "",
+            )
+            text = "[MOCK] stream\n" + (last_user or "(empty)")
+            yield _sse_pack({"type": "chunk", "text": text})
+            yield _sse_pack({"type": "done", "returncode": 0, "stderr": ""})
+            return
+        if not os.path.isdir(settings.cursor_project_dir):
+            yield _sse_pack(
+                {
+                    "type": "error",
+                    "message": "cursor_project_dir missing",
+                    "stderr": "",
+                }
+            )
+            return
+        prompt = msgs_to_prompt(body.messages)
+        agen = stream_cursor_agent(
+            prompt,
+            timeout_sec=settings.agent_timeout_sec,
+            run_id=run_id,
+        )
+        try:
+            async for ev in agen:
+                yield _sse_pack(ev)
+                try:
+                    if await request.is_disconnected():
+                        logger.warning(
+                            "[%s] SSE client disconnected; closing agent stream",
+                            run_id,
+                        )
+                        break
+                except Exception:
+                    pass
+        except FileNotFoundError:
+            yield _sse_pack(
+                {
+                    "type": "error",
+                    "message": "cursor_cli_not_found",
+                    "stderr": "",
+                }
+            )
+        except asyncio.CancelledError:
+            logger.warning("[%s] SSE stream cancelled (client/server)", run_id)
+            raise
+        finally:
+            try:
+                await agen.aclose()
+            except Exception:
+                pass
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )

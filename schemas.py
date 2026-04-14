@@ -1,4 +1,4 @@
-"""POST /chat 요청·응답용 Pydantic 모델."""
+"""Pydantic models for chat API."""
 
 from typing import Dict, List, Literal, Optional
 
@@ -25,7 +25,35 @@ class ChatResponse(BaseModel):
 
 
 class WarmupResponse(BaseModel):
-    """POST /warmup — 첫 CLI 기동·인증을 미리 끌어올릴 때 쓰는 가벼운 확인 응답."""
+    """Response for POST /warmup."""
 
     status: Literal["ok"] = "ok"
-    message: str = "Cursor 에이전트가 응답했습니다."
+    message: str = "Cursor agent is ready."
+
+
+class ChatJobRequest(ChatRequest):
+    """POST /chat/jobs — optional webhook on completion or failure."""
+
+    webhook_url: Optional[str] = Field(
+        default=None,
+        description="If set, POST JSON payload when job finishes.",
+    )
+
+
+class ChatJobCreateResponse(BaseModel):
+    job_id: str
+    status: Literal["queued"] = "queued"
+
+
+JobStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
+
+
+class ChatJobStatusResponse(BaseModel):
+    job_id: str
+    status: JobStatus
+    message: Optional[AssistantMessage] = None
+    error: Optional[str] = None
+    returncode: Optional[int] = None
+    stderr_tail: Optional[str] = None
+    webhook_delivered: Optional[bool] = None
+    webhook_error: Optional[str] = None

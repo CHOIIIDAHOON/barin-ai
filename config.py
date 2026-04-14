@@ -70,5 +70,17 @@ class Settings(BaseSettings):
     # true면 Cursor CLI 없이 즉시 가짜 답변 (Flutter·CORS·POST 파이프만 테스트할 때).
     mock_agent: bool = False
 
+    # --- Async jobs + worker (POST /chat/jobs) ---
+    # In-memory job history cap per uvicorn worker process.
+    agent_job_store_max: int = 500
+    # Concurrent queue consumers (each run still spawns one cursor CLI). Same repo: 1 recommended.
+    agent_worker_concurrency: int = 1
+    # HTTP POST timeout when delivering job webhooks (seconds).
+    job_webhook_timeout_sec: float = 30.0
+
+    # --- Streaming (POST /chat/stream) ---
+    # Max bytes per read from agent stdout when streaming.
+    agent_stream_read_chunk_bytes: int = 4096
+
 
 settings = Settings()
