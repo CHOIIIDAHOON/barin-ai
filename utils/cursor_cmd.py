@@ -27,5 +27,5 @@ def build_cmd(prompt: str) -> List[str]:
         cmd.extend(["--mode", mode])
     if settings.cursor_agent_force:
         cmd.append("--force")
-    cmd.extend(["-p", "--output-format", "text", prompt])
+    cmd.extend(["-p", prompt, "--output-format", "text"])
     return cmd
