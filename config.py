@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     cursor_cli_path: str = "cursor"
     # Subprocess timeout in seconds (agent runs can be long).
     agent_timeout_sec: int = 600
+    # 에이전트가 끝나기 전 주기적으로 서버 로그에 남기는 간격(초). 0이면 주기 로그 끔(대기만).
+    agent_heartbeat_log_sec: float = 20.0
+    # POST /warmup 최대 대기(초). 첫 CLI 기동이 길 수 있어 기본은 여유 있게 둠.
+    warmup_timeout_sec: int = 300
     # Optional: require this Bearer token on POST /chat (empty = no HTTP auth).
     chat_api_secret: str = ""
     # Cursor CLI --model (run: cursor agent --list-models). Default is Composer fast tier.

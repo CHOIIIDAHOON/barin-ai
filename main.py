@@ -1,7 +1,5 @@
-import asyncio
 import logging
 import os
-import sys
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -9,13 +7,14 @@ from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.exceptions import RequestValidationError
 
 from config import settings
-from schemas import AssistantMessage, ChatRequest, ChatResponse
-from utils.agent_reap import reap_proc
+from schemas import AssistantMessage, ChatRequest, ChatResponse, WarmupResponse
 from utils.auth import require_bearer
 from utils.cors import apply_cors
-from utils.cursor_cmd import build_cmd
+from utils.cursor_agent import run_cursor_agent
 from utils.http_handlers import validation_error
 from utils.prompt import msgs_to_prompt
+
+_WARMUP_PROMPT = "Reply with exactly: ok"
 
 _APP_ROOT = Path(__file__).resolve().parent
 
@@ -44,6 +43,56 @@ def health() -> Dict[str, str]:
     if settings.mock_agent:
         out["cursor_agent"] = "mock"
     return out
+
+
+@app.post("/warmup", response_model=WarmupResponse, dependencies=[Depends(require_bearer)])
+async def warmup() -> WarmupResponse:
+    """첫 Cursor CLI 기동·인증·캐시를 미리 끌어올릴 때 호출(클라이언트 기동 시 1회 권장)."""
+    if settings.mock_agent:
+        return WarmupResponse(message="MOCK_AGENT=true — CLI를 호출하지 않았습니다.")
+
+    project = settings.cursor_project_dir
+    if not os.path.isdir(project):
+        raise HTTPException(
+            status_code=500,
+            detail=f"cursor_project_dir 경로가 디렉터리가 아닙니다: {project}",
+        )
+
+    try:
+        _out, err, returncode = await run_cursor_agent(
+            _WARMUP_PROMPT,
+            timeout_sec=settings.warmup_timeout_sec,
+        )
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Cursor 에이전트 실행 파일을 찾을 수 없습니다. .env의 CURSOR_CLI_PATH에 전체 경로를 설정하세요 "
+                f"(예: `which cursor` 또는 `which agent`). 현재 설정: {settings.cursor_cli_path!r}."
+            ),
+        )
+    except TimeoutError:
+        raise HTTPException(
+            status_code=504,
+            detail=(
+                f"워밍업 시간이 초과되었습니다(WARMUP_TIMEOUT_SEC={settings.warmup_timeout_sec}). "
+                "첫 실행은 더 오래 걸릴 수 있으니 값을 늘리거나, 서버에서 한 번 수동으로 `cursor agent`를 실행해 보세요."
+            ),
+        )
+
+    if returncode != 0:
+        logger.error("POST /warmup: agent 실패 returncode=%s", returncode)
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": "cursor_agent_warmup_failed",
+                "message": "워밍업용 에이전트 실행이 비정상 종료했습니다.",
+                "returncode": returncode,
+                "stderr": (err[-8000:] if err else ""),
+            },
+        )
+
+    return WarmupResponse()
 
 
 @app.post("/chat", response_model=ChatResponse, dependencies=[Depends(require_bearer)])
@@ -89,28 +138,12 @@ async def chat(
             detail=f"cursor_project_dir 경로가 디렉터리가 아닙니다: {project}",
         )
 
-    cmd = build_cmd(prompt)
-    env = os.environ.copy()
-    api_key = (settings.cursor_api_key or "").strip()
-    if api_key:
-        env["CURSOR_API_KEY"] = api_key
-
-    sub_kw = {}
-    if sys.platform != "win32":
-        sub_kw["start_new_session"] = True
-
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            cwd=project,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-            **sub_kw,
+        out, err, returncode = await run_cursor_agent(
+            prompt,
+            timeout_sec=settings.agent_timeout_sec,
         )
     except FileNotFoundError:
-        logger.error("POST /chat: cursor CLI 없음 cmd[0]=%s", cmd[0] if cmd else "")
         raise HTTPException(
             status_code=500,
             detail=(
@@ -118,44 +151,20 @@ async def chat(
                 f"(예: `which cursor` 또는 `which agent`). 현재 설정: {settings.cursor_cli_path!r}."
             ),
         )
-
-    comm_task = asyncio.create_task(proc.communicate())
-    try:
-        done, _pending = await asyncio.wait(
-            {comm_task},
-            timeout=settings.agent_timeout_sec,
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-    except asyncio.CancelledError:
-        logger.info("POST /chat: 요청 취소됨 — 에이전트 하위 프로세스만 정리합니다")
-        await asyncio.shield(reap_proc(proc, comm_task))
-        raise
-
-    if not done:
-        logger.error("POST /chat: agent 타임아웃 (%ss)", settings.agent_timeout_sec)
-        await asyncio.shield(reap_proc(proc, comm_task))
+    except TimeoutError:
         raise HTTPException(
             status_code=504,
             detail="Cursor 에이전트 응답 시간이 초과되었습니다.",
         )
 
-    try:
-        stdout_b, stderr_b = comm_task.result()
-    except Exception:
-        await asyncio.shield(reap_proc(proc, comm_task))
-        raise
-
-    out = (stdout_b or b"").decode("utf-8", errors="replace").strip()
-    err = (stderr_b or b"").decode("utf-8", errors="replace").strip()
-
-    if proc.returncode != 0:
-        logger.error("POST /chat: agent 실패 returncode=%s", proc.returncode)
+    if returncode != 0:
+        logger.error("POST /chat: agent 실패 returncode=%s", returncode)
         raise HTTPException(
             status_code=502,
             detail={
                 "error": "cursor_agent_failed",
                 "message": "Cursor 에이전트가 비정상 종료했습니다.",
-                "returncode": proc.returncode,
+                "returncode": returncode,
                 "stderr": err[-8000:] if err else "",
                 "stdout": out[-8000:] if out else "",
             },
