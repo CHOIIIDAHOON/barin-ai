@@ -1,24 +1,8 @@
-# Python virtualenv / cache
-.venv/
-venv/
-__pycache__/
-*.pyc
+# Ignore everything by default.
+*
 
-# Runtime logs / pid
-logs/
-*.log
-*.pid
-
-# Git metadata / editor noise
-.git/
-.idea/
-.vscode/
-.DS_Store
-
-# Build/test caches
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-htmlcov/
-dist/
-build/
+# Allow only these trees.
+!brain/
+!brain/**
+!.cursor/
+!.cursor/**
