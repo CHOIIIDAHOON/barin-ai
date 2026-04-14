@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import sys
+import time
 from typing import Optional, Tuple
 
 from config import settings
@@ -68,6 +69,7 @@ async def run_cursor_agent(
     if sys.platform != "win32":
         sub_kw["start_new_session"] = True
 
+    t_run = time.perf_counter()
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -82,6 +84,7 @@ async def run_cursor_agent(
         logger.error("cursor/agent 실행 파일을 찾을 수 없음 cmd[0]=%r", cmd[0] if cmd else "")
         raise
 
+    t_spawn = time.perf_counter() - t_run
     comm_task = asyncio.create_task(proc.communicate())
     try:
         if hb <= 0:
@@ -116,4 +119,13 @@ async def run_cursor_agent(
 
     out = (stdout_b or b"").decode("utf-8", errors="replace").strip()
     err = (stderr_b or b"").decode("utf-8", errors="replace").strip()
+    t_total = time.perf_counter() - t_run
+    t_communicate = max(0.0, t_total - t_spawn)
+    logger.info(
+        "cursor_agent 내부 타이밍: subprocess_create=%.3fs communicate_wait=%.3fs total=%.3fs prompt_chars=%s",
+        t_spawn,
+        t_communicate,
+        t_total,
+        len(prompt),
+    )
     return out, err, proc.returncode if proc.returncode is not None else -1

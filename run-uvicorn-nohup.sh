@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# When invoked as `sh run-uvicorn-nohup.sh`, dash ignores the shebang and lacks pipefail.
+if [ -z "${BASH_VERSION-}" ]; then
+  exec /usr/bin/env bash "$0" "$@"
+fi
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
@@ -12,8 +16,10 @@ fi
 
 HOST="${UVICORN_HOST:-0.0.0.0}"
 PORT="${UVICORN_PORT:-8000}"
-LOG="${NOHUP_LOG:-$ROOT/nohup-uvicorn.log}"
+LOG="${NOHUP_LOG:-$ROOT/logs/nohup-uvicorn.log}"
 PIDFILE="${UVICORN_PIDFILE:-$ROOT/uvicorn.$PORT.pid}"
+
+mkdir -p "$(dirname "$LOG")"
 
 stop_pidfile() {
   [[ ! -f "$PIDFILE" ]] && return 0
