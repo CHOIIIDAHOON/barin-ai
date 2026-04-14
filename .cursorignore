@@ -6,3 +6,6 @@
 !brain/**
 !.cursor/
 !.cursor/**
+
+# Allow runtime config file.
+!config.py
